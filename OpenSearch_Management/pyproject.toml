@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opensearch-management"
+version = "0.1.0"
+description = "Enterprise-grade Python tool for OpenSearch Management."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Anish Karki", email = "test@example.com"}]
+dependencies = [
+    "typer>=0.9",
+    "rich>=13.7",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.0",
+    "structlog>=24.1",
+    "opensearch-py>=2.4.0",
+    "requests>=2.31.0",
+    "PyYAML>=6.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=4.1",
+    "mypy>=1.10",
+    "ruff>=0.5",
+    "pip-audit>=2.7",
+]
+
+[project.scripts]
+opensearch-manager = "opensearch_management.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
