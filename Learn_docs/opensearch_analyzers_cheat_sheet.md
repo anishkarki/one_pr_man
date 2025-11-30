@@ -40,6 +40,29 @@
 *   **Use Case**: Multi-word synonyms (e.g., "ny" -> "new york").
 *   **Mechanism**: `synonym_graph` filter creates a graph where multi-word synonyms occupy the same position length as the original term.
 
+## Common Pitfalls: Text vs. Keyword
+
+### The `_raw` vs `_raw.keyword` Dilemma
+When you ingest logs, OpenSearch often creates two versions of a string field:
+
+1.  **Text Field (`_raw`)**:
+    *   **Analyzer**: Standard (usually).
+    *   **Behavior**: Splits text into words. Punctuation is removed. Case-insensitive.
+    *   **Use for**: Searching for specific words inside the log (`match`, `match_phrase`).
+    *   **Example**: `Error connecting to DB` -> `["error", "connecting", "to", "db"]`
+
+2.  **Keyword Field (`_raw.keyword`)**:
+    *   **Analyzer**: None (Keyword tokenizer).
+    *   **Behavior**: Stores the **exact** string as a single unit. Case-sensitive. Preserves punctuation.
+    *   **Use for**: Sorting, Aggregations (counting), or Exact Matches.
+    *   **Example**: `Error connecting to DB` -> `["Error connecting to DB"]`
+
+### Why `term` query fails on `_raw.keyword`
+If you search for `term: { "_raw.keyword": "Error" }`, it will **fail**.
+*   **Reason**: The inverted index contains the token `"Error connecting to DB"`.
+*   **Comparison**: `"Error"` != `"Error connecting to DB"`.
+*   **Fix**: Use `term` on `_raw.keyword` ONLY if you provide the **entire** string exactly as it was indexed.
+
 ## Testing
 *   **API**: `GET /_analyze`
 *   **Usage**:
