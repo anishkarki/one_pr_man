@@ -31,6 +31,7 @@ def insert_dummy_data():
     """Insert dummy data to trigger alerts."""
     url = f"{BASE_URL}/{INDEX_NAME}/_doc"
     current_time = int(time.time() * 1000)
+    old_time = current_time - (10 * 60 * 1000) # 10 mins ago
 
     docs = [
         {
@@ -47,10 +48,18 @@ def insert_dummy_data():
             "hostname": "host-C",
             "_raw": "Operation completed successfully",
             "@timestamp": current_time
+        },
+        {
+            "hostname": "host-OLD",
+            "_raw": "This is an old error",
+            "@timestamp": old_time
         }
     ]
 
     print("\n--- Inserting Dummy Data ---")
+    print(f"Inserting recent data for host-A, host-B, host-C at {current_time}")
+    print(f"Inserting old data for host-OLD at {old_time} (should be ignored by 5m threshold)")
+
     for doc in docs:
         response = requests.post(url, auth=AUTH, headers=HEADERS, json=doc, verify=VERIFY_SSL)
         if response.status_code == 201:
@@ -79,6 +88,13 @@ def create_bucket_monitor():
                     "indices": [INDEX_NAME],
                     "query": {
                         "size": 0,
+                        "query": {
+                            "range": {
+                                "@timestamp": {
+                                    "gte": "now-5m"
+                                }
+                            }
+                        },
                         "aggs": {
                             "by_hostname": {
                                 "terms": {
@@ -168,6 +184,8 @@ def execute_monitor(monitor_id):
         print("Monitor executed successfully.")
         exec_data = exec_resp.json()
         
+        triggered_hosts = set()
+
         # Check trigger results
         if 'trigger_results' in exec_data:
             print("\nTrigger Results:")
@@ -175,6 +193,7 @@ def execute_monitor(monitor_id):
                 # Check action results
                 if 'action_results' in result:
                     for bucket_key, action_res in result['action_results'].items():
+                        triggered_hosts.add(bucket_key)
                         for action_name, res in action_res.items():
                              error = res.get('error')
                              status = res.get('status')
@@ -183,6 +202,18 @@ def execute_monitor(monitor_id):
                                  print(f"    Error: {error}")
                              else:
                                  print(f"    Success! Status: {status}")
+        
+        print("\n--- Validation Summary ---")
+        if "host-A" in triggered_hosts and "host-B" in triggered_hosts:
+            print("SUCCESS: host-A and host-B triggered alerts.")
+        else:
+            print(f"FAILURE: host-A or host-B missing from alerts. Found: {triggered_hosts}")
+
+        if "host-OLD" not in triggered_hosts:
+            print("SUCCESS: host-OLD did not trigger (correctly filtered by 5m threshold).")
+        else:
+            print("FAILURE: host-OLD triggered an alert (threshold failed).")
+
     else:
         print(f"Execution failed: {exec_resp.status_code} - {exec_resp.text}")
 
