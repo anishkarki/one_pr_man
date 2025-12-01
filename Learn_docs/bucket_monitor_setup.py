@@ -36,7 +36,7 @@ def insert_dummy_data():
     docs = [
         {
             "hostname": "host-A",
-            "_raw": "This is a critical error in the system",
+            "_raw": "complete error happened. All down",
             "@timestamp": current_time
         },
         {
@@ -231,6 +231,8 @@ def execute_monitor(monitor_id):
                                  print(f"    Error: {error}")
                              else:
                                  print(f"    Success! Status: {status}")
+                                 # print(f"    Full Result: {res}") # Debug
+
         
         print("\n--- Validation Summary ---")
         if "host-A" in triggered_hosts and "host-B" in triggered_hosts:
@@ -246,6 +248,40 @@ def execute_monitor(monitor_id):
     else:
         print(f"Execution failed: {exec_resp.status_code} - {exec_resp.text}")
 
+def check_mailhog():
+    """Check MailHog for the latest email and verify content."""
+    print("\n--- Checking MailHog ---")
+    try:
+        # Wait a moment for email to arrive
+        time.sleep(2)
+        response = requests.get("http://localhost:8025/api/v2/messages")
+        if response.status_code == 200:
+            messages = response.json()['items']
+            if not messages:
+                print("No messages found in MailHog.")
+                return
+
+            # Get the latest message
+            latest_msg = messages[0]
+            subject = latest_msg['Content']['Headers']['Subject'][0]
+            body = latest_msg['Content']['Body']
+            
+            print(f"Latest Email Subject: {subject}")
+            print("Latest Email Body:")
+            print("-" * 40)
+            print(body)
+            print("-" * 40)
+            
+            expected_log = "complete error happened. All down"
+            if expected_log in body:
+                print(f"SUCCESS: Found expected log line in email: '{expected_log}'")
+            else:
+                print(f"FAILURE: Expected log line '{expected_log}' NOT found in email.")
+        else:
+            print(f"Failed to query MailHog: {response.status_code}")
+    except Exception as e:
+        print(f"Error checking MailHog: {e}")
+
 if __name__ == "__main__":
     if check_connection():
         insert_dummy_data()
@@ -257,3 +293,4 @@ if __name__ == "__main__":
             # Give the monitor a moment to be ready (though execute is immediate)
             time.sleep(1)
             execute_monitor(monitor_id)
+            check_mailhog()
