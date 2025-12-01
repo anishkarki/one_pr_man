@@ -107,6 +107,26 @@ def create_bucket_monitor():
                                             "match": {
                                                 "_raw": "error"
                                             }
+                                        },
+                                        "aggs": {
+                                            "latest_log": {
+                                                "top_hits": {
+                                                    "size": 1,
+                                                    "sort": [
+                                                        {
+                                                            "@timestamp": {
+                                                                "order": "desc"
+                                                            }
+                                                        }
+                                                    ],
+                                                    "_source": {
+                                                        "includes": [
+                                                            "_raw",
+                                                            "hostname"
+                                                        ]
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -137,19 +157,15 @@ def create_bucket_monitor():
                             "name": "Send Email Notification",
                             "destination_id": EMAIL_CHANNEL_ID,
                             "subject_template": {
-                                "source": "Alert: Error detected on host {{ctx.newAlerts.0.bucket_keys}}"
+                                "source": "Alert: Error detected on hosts"
                             },
                             "message_template": {
                                 "source": """
-Hello,
-
-An error was detected on host: {{ctx.newAlerts.0.bucket_keys}}
-Time: {{ctx.periodEnd}}
-
-Please investigate.
-
-Regards,
-OpenSearch Monitor
+Debug:
+{{#ctx.results.0.aggregations.by_hostname.buckets}}
+  Key: {{key}}
+  DocCount: {{error_check.doc_count}}
+{{/ctx.results.0.aggregations.by_hostname.buckets}}
 """
                             },
                             "throttle_enabled": False
