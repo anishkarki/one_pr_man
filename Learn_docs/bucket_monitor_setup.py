@@ -161,11 +161,24 @@ def create_bucket_monitor():
                             },
                             "message_template": {
                                 "source": """
-Debug:
+Hello,
+
+The following hosts have reported errors:
+
 {{#ctx.results.0.aggregations.by_hostname.buckets}}
-  Key: {{key}}
-  DocCount: {{error_check.doc_count}}
+{{#error_check.doc_count}}
+Host: {{key}}
+{{#error_check.latest_log.hits.hits}}
+Log: {{_source._raw}}
+{{/error_check.latest_log.hits.hits}}
+----------------------------------------
+{{/error_check.doc_count}}
 {{/ctx.results.0.aggregations.by_hostname.buckets}}
+
+Please investigate.
+
+Regards,
+OpenSearch Monitor
 """
                             },
                             "throttle_enabled": False
