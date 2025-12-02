@@ -27,54 +27,72 @@ def check_connection():
         print(f"Connection error: {e}")
         return False
 
+def insert_doc(hostname, message, timestamp=None):
+    """Insert a single document."""
+    url = f"{BASE_URL}/{INDEX_NAME}/_doc"
+    if timestamp is None:
+        timestamp = int(time.time() * 1000)
+    
+    doc = {
+        "hostname": hostname,
+        "_raw": message,
+        "@timestamp": timestamp
+    }
+    
+    response = requests.post(url, auth=AUTH, headers=HEADERS, json=doc, verify=VERIFY_SSL)
+    if response.status_code == 201:
+        print(f"Inserted doc for {hostname}")
+    else:
+        print(f"Failed to insert doc for {hostname}: {response.text}")
+
 def insert_dummy_data():
     """Insert dummy data to trigger alerts."""
-    url = f"{BASE_URL}/{INDEX_NAME}/_doc"
     current_time = int(time.time() * 1000)
     old_time = current_time - (10 * 60 * 1000) # 10 mins ago
 
-    docs = [
-        {
-            "hostname": "host-A",
-            "_raw": "complete error happened. All down",
-            "@timestamp": current_time
-        },
-        {
-            "hostname": "host-B",
-            "_raw": "Another error occurred here",
-            "@timestamp": current_time
-        },
-        {
-            "hostname": "host-C",
-            "_raw": "Operation completed successfully",
-            "@timestamp": current_time
-        },
-        {
-            "hostname": "host-OLD",
-            "_raw": "This is an old error",
-            "@timestamp": old_time
-        }
-    ]
-
     print("\n--- Inserting Dummy Data ---")
-    print(f"Inserting recent data for host-A, host-B, host-C at {current_time}")
-    print(f"Inserting old data for host-OLD at {old_time} (should be ignored by 5m threshold)")
+    insert_doc("host-A", "complete error happened. All down", current_time)
+    insert_doc("host-B", "Another error occurred here", current_time)
+    insert_doc("host-C", "Operation completed successfully", current_time)
+    insert_doc("host-OLD", "This is an old error", old_time)
 
-    for doc in docs:
-        response = requests.post(url, auth=AUTH, headers=HEADERS, json=doc, verify=VERIFY_SSL)
-        if response.status_code == 201:
-            print(f"Inserted doc for {doc['hostname']}")
-        else:
-            print(f"Failed to insert doc for {doc['hostname']}: {response.text}")
+def get_monitor_by_name(name):
+    """Search for a monitor by name."""
+    url = f"{BASE_URL}/_plugins/_alerting/monitors/_search"
+    query = {
+        "query": {
+            "match": {
+                "monitor.name": name
+            }
+        }
+    }
+    response = requests.get(url, auth=AUTH, headers=HEADERS, json=query, verify=VERIFY_SSL)
+    if response.status_code == 200:
+        hits = response.json()['hits']['hits']
+        for hit in hits:
+            if hit['_source']['name'] == name:
+                return hit['_id']
+    return None
 
-def create_bucket_monitor():
-    """Create the Bucket-Level Monitor."""
+def delete_monitor_by_name(name):
+    """Delete a monitor by name to ensure fresh state."""
+    mid = get_monitor_by_name(name)
+    if mid:
+        requests.delete(f"{BASE_URL}/_plugins/_alerting/monitors/{mid}", auth=AUTH, headers=HEADERS, verify=VERIFY_SSL)
+        print(f"Deleted existing monitor {mid}")
+
+def ensure_bucket_monitor():
+    """Create or Update the Bucket-Level Monitor."""
     url = f"{BASE_URL}/_plugins/_alerting/monitors"
+    monitor_name = "Hostname Error Monitor (Python Script)"
+    
+    # Delete first to ensure fresh state (no old throttling history)
+    delete_monitor_by_name(monitor_name)
     
     monitor_payload = {
         "type": "bucket_level_monitor",
         "monitor_type": "bucket_level_monitor", 
-        "name": "Hostname Error Monitor (Python Script)",
+        "name": monitor_name,
         "enabled": True,
         "schedule": {
             "period": {
@@ -98,7 +116,7 @@ def create_bucket_monitor():
                         "aggs": {
                             "by_hostname": {
                                 "terms": {
-                                    "field": "hostname.keyword",
+                                    "field": "hostname",
                                     "size": 10
                                 },
                                 "aggs": {
@@ -126,7 +144,36 @@ def create_bucket_monitor():
                                                         ]
                                                     }
                                                 }
+                                            },
+                                            "max_error_time": {
+                                                "max": {
+                                                    "field": "@timestamp"
+                                                }
                                             }
+                                        }
+                                    },
+                                    "only_errors": {
+                                        "bucket_selector": {
+                                            "buckets_path": {
+                                                "count": "error_check._count"
+                                            },
+                                            "script": "params.count > 0"
+                                        }
+                                    },
+                                    "sort_by_time": {
+                                        "bucket_sort": {
+                                            "sort": [
+                                                {
+                                                    "error_check>max_error_time": {
+                                                        "order": "desc"
+                                                    }
+                                                },
+                                                {
+                                                    "_count": {
+                                                        "order": "asc"
+                                                    }
+                                                }
+                                            ]
                                         }
                                     }
                                 }
@@ -156,32 +203,27 @@ def create_bucket_monitor():
                         {
                             "name": "Send Email Notification",
                             "destination_id": EMAIL_CHANNEL_ID,
-                            "subject_template": {
-                                "source": "Alert: Error detected on hosts"
+                            "action_execution_policy": {
+                                "action_execution_scope": {
+                                    "per_alert": {
+                                        "actionable_alerts": [
+                                            "DEDUPED",
+                                            "NEW"
+                                        ]
+                                    }
+                                }
                             },
-                            "message_template": {
-                                "source": """
-Hello,
-
-The following hosts have reported errors:
-
-{{#ctx.results.0.aggregations.by_hostname.buckets}}
-{{#error_check.doc_count}}
-Host: {{key}}
-{{#error_check.latest_log.hits.hits}}
-Log: {{_source._raw}}
-{{/error_check.latest_log.hits.hits}}
-----------------------------------------
-{{/error_check.doc_count}}
-{{/ctx.results.0.aggregations.by_hostname.buckets}}
-
-Please investigate.
-
-Regards,
-OpenSearch Monitor
-"""
-                            },
-                            "throttle_enabled": False
+                                                        "subject_template": {
+                                                            "source": "Alert: Error detected on host {{ctx.results.0.aggregations.by_hostname.buckets.0.key}}"
+                                                        },
+                                                        "message_template": {
+                                                            "source": "Hello,\n\nAlert details for host {{ctx.results.0.aggregations.by_hostname.buckets.0.key}}:\n\n{{#ctx.results.0.aggregations.by_hostname.buckets.0.error_check.latest_log.hits.hits}}- Host: {{_source.hostname}}\n  Log: {{_source._raw}}\n{{/ctx.results.0.aggregations.by_hostname.buckets.0.error_check.latest_log.hits.hits}}{{^ctx.results.0.aggregations.by_hostname.buckets.0.error_check.latest_log.hits.hits}}No recent error log captured.{{/ctx.results.0.aggregations.by_hostname.buckets.0.error_check.latest_log.hits.hits}}\n\nPlease investigate."
+                                                        },
+                            "throttle_enabled": True,
+                            "throttle": {
+                                "value": 5,
+                                "unit": "MINUTES"
+                            }
                         }
                     ]
                 }
@@ -189,7 +231,9 @@ OpenSearch Monitor
         ]
     }
 
-    print("\n--- Creating Bucket Monitor ---")
+    print("\n--- Ensuring Bucket Monitor ---")
+    
+    print("Creating new monitor...")
     response = requests.post(url, auth=AUTH, headers=HEADERS, json=monitor_payload, verify=VERIFY_SSL)
     
     if response.status_code in [200, 201]:
@@ -203,50 +247,50 @@ OpenSearch Monitor
 def execute_monitor(monitor_id):
     """Manually execute the monitor to verify alerts."""
     if not monitor_id:
-        return
+        return {}
 
     print(f"\n--- Executing Monitor {monitor_id} ---")
-    exec_url = f"{BASE_URL}/_plugins/_alerting/monitors/{monitor_id}/_execute"
+    # dryrun=false ensures that alerts are actually created/updated, allowing throttling to work
+    exec_url = f"{BASE_URL}/_plugins/_alerting/monitors/{monitor_id}/_execute?dryrun=false"
     exec_resp = requests.post(exec_url, auth=AUTH, headers=HEADERS, verify=VERIFY_SSL)
     
     if exec_resp.status_code == 200:
         print("Monitor executed successfully.")
         exec_data = exec_resp.json()
         
-        triggered_hosts = set()
+        triggered_hosts = {} # host -> is_throttled
 
         # Check trigger results
         if 'trigger_results' in exec_data:
             print("\nTrigger Results:")
             for trigger_id, result in exec_data['trigger_results'].items():
+                print(f"  Trigger {trigger_id} payload:\n{json.dumps(result, indent=2)}")
                 # Check action results
                 if 'action_results' in result:
                     for bucket_key, action_res in result['action_results'].items():
-                        triggered_hosts.add(bucket_key)
                         for action_name, res in action_res.items():
                              error = res.get('error')
                              status = res.get('status')
+                             is_throttled = res.get('throttled', False)
+                             triggered_hosts[bucket_key] = is_throttled
+                             
                              print(f"  Bucket: {bucket_key} - Action: {action_name}")
+                             print(f"    Throttled: {is_throttled}")
                              if error:
                                  print(f"    Error: {error}")
                              else:
                                  print(f"    Success! Status: {status}")
                                  # print(f"    Full Result: {res}") # Debug
 
-        
-        print("\n--- Validation Summary ---")
-        if "host-A" in triggered_hosts and "host-B" in triggered_hosts:
-            print("SUCCESS: host-A and host-B triggered alerts.")
         else:
-            print(f"FAILURE: host-A or host-B missing from alerts. Found: {triggered_hosts}")
+            print("No trigger_results found. Raw execute payload:")
+            print(json.dumps(exec_data, indent=2))
 
-        if "host-OLD" not in triggered_hosts:
-            print("SUCCESS: host-OLD did not trigger (correctly filtered by 5m threshold).")
-        else:
-            print("FAILURE: host-OLD triggered an alert (threshold failed).")
+        return triggered_hosts
 
     else:
         print(f"Execution failed: {exec_resp.status_code} - {exec_resp.text}")
+        return {}
 
 def check_mailhog():
     """Check MailHog for the latest email and verify content."""
@@ -261,36 +305,136 @@ def check_mailhog():
                 print("No messages found in MailHog.")
                 return
 
-            # Get the latest message
-            latest_msg = messages[0]
-            subject = latest_msg['Content']['Headers']['Subject'][0]
-            body = latest_msg['Content']['Body']
+            print(f"Found {len(messages)} messages in MailHog.")
             
-            print(f"Latest Email Subject: {subject}")
-            print("Latest Email Body:")
-            print("-" * 40)
-            print(body)
-            print("-" * 40)
+            # Check the last few messages (since we just ran the monitor)
+            # We expect 2 messages (one for host-A, one for host-B) if it's per-bucket.
             
+            count = 0
+            for msg in messages[:2]: # Look at top 2
+                count += 1
+                subject = msg['Content']['Headers']['Subject'][0]
+                body = msg['Content']['Body']
+                print(f"\nEmail #{count}")
+                print(f"Subject: {subject}")
+                print(f"Body Full:\n{body}") 
+                
             expected_log = "complete error happened. All down"
-            if expected_log in body:
-                print(f"SUCCESS: Found expected log line in email: '{expected_log}'")
-            else:
-                print(f"FAILURE: Expected log line '{expected_log}' NOT found in email.")
+            # We want to see if we have multiple emails.
+            
         else:
             print(f"Failed to query MailHog: {response.status_code}")
     except Exception as e:
         print(f"Error checking MailHog: {e}")
 
+def clear_mailhog():
+    """Delete all messages in MailHog."""
+    try:
+        requests.delete("http://localhost:8025/api/v1/messages")
+        print("Cleared MailHog messages.")
+    except Exception:
+        pass
+
+def clean_index():
+    """Delete and recreate the index to ensure a clean state."""
+    print("\n--- Cleaning Index ---")
+    resp = requests.delete(f"{BASE_URL}/{INDEX_NAME}", auth=AUTH, headers=HEADERS, verify=VERIFY_SSL)
+    print(f"Delete response: {resp.status_code} - {resp.text}")
+    
+    # Define mapping to ensure @timestamp is treated as a date
+    mapping = {
+        "mappings": {
+            "properties": {
+                "@timestamp": {"type": "date"},
+                "hostname": {"type": "keyword"},
+                "_raw": {"type": "text"}
+            }
+        }
+    }
+    
+    requests.put(f"{BASE_URL}/{INDEX_NAME}", auth=AUTH, headers=HEADERS, json=mapping, verify=VERIFY_SSL)
+    print(f"Recreated index {INDEX_NAME} with date mapping")
+
+def debug_search():
+    """Debug: Search for all docs."""
+    url = f"{BASE_URL}/{INDEX_NAME}/_search"
+    response = requests.get(url, auth=AUTH, headers=HEADERS, verify=VERIFY_SSL)
+    print("\n--- Debug Search ---")
+    if response.status_code == 200:
+        hits = response.json()['hits']['total']['value']
+        print(f"Total hits: {hits}")
+        
+        # Search specifically for host-A
+        query = {
+            "query": {
+                "term": {
+                    "hostname": "host-A"
+                }
+            }
+        }
+        resp = requests.get(f"{BASE_URL}/{INDEX_NAME}/_search", auth=AUTH, headers=HEADERS, json=query, verify=VERIFY_SSL)
+        print(f"Search for host-A hits: {resp.json()['hits']['total']['value']}")
+        if resp.json()['hits']['hits']:
+             print(f"Sample host-A doc: {resp.json()['hits']['hits'][0]['_source']}")
+
+        # Check mapping
+        mapping_url = f"{BASE_URL}/{INDEX_NAME}/_mapping"
+        map_resp = requests.get(mapping_url, auth=AUTH, headers=HEADERS, verify=VERIFY_SSL)
+        print(f"Mapping: {map_resp.text}")
+    else:
+        print(f"Search failed: {response.text}")
+
 if __name__ == "__main__":
     if check_connection():
-        insert_dummy_data()
-        # Give OpenSearch a moment to index the data
-        time.sleep(2)
+        clean_index() # Clean up old data
+        clear_mailhog()
         
-        monitor_id = create_bucket_monitor()
-        if monitor_id:
-            # Give the monitor a moment to be ready (though execute is immediate)
-            time.sleep(1)
-            execute_monitor(monitor_id)
-            check_mailhog()
+        # Ensure monitor exists with throttling enabled
+        monitor_id = ensure_bucket_monitor()
+        if not monitor_id:
+            sys.exit(1)
+
+        # --- Step 1: Trigger Host A ---
+        print("\n=== STEP 1: Trigger Host A ===")
+        insert_doc("host-A", "Error on A", int(time.time() * 1000))
+        print("Waiting 5 seconds for indexing...")
+        time.sleep(5)
+        
+        debug_search() # Check if data is there
+        
+        triggered_1 = execute_monitor(monitor_id)
+        if "host-A" in triggered_1 and not triggered_1["host-A"]:
+            print(">>> Step 1 PASS: Host A triggered and NOT throttled.")
+        else:
+            print(f">>> Step 1 FAIL: Host A status: {triggered_1.get('host-A', 'Not Found')}")
+
+        # --- Step 2: Sleep ---
+        print("\n=== STEP 2: Sleeping for 2 seconds (simulating time passing) ===")
+        time.sleep(2)
+
+        # --- Step 3: Trigger Host A (again) and Host B ---
+        print("\n=== STEP 3: Trigger Host A (again) and Host B ===")
+        current_time = int(time.time() * 1000)
+        insert_doc("host-A", "Error on A again", current_time)
+        insert_doc("host-B", "Error on B", current_time)
+        print("Waiting 5 seconds for indexing...")
+        time.sleep(5)
+
+        triggered_2 = execute_monitor(monitor_id)
+
+        # --- Step 4: Verify Throttling ---
+        print("\n=== STEP 4: Verify Throttling ===")
+        
+        # Host A should be throttled
+        if "host-A" in triggered_2 and triggered_2["host-A"]:
+            print(">>> Step 4 PASS: Host A was throttled (triggered but action suppressed).")
+        else:
+            print(f">>> Step 4 FAIL: Host A throttling status: {triggered_2.get('host-A', 'Not Found')}")
+
+        # Host B SHOULD trigger (new alert) and NOT be throttled
+        if "host-B" in triggered_2 and not triggered_2["host-B"]:
+            print(">>> Step 4 PASS: Host B triggered (new alert).")
+        else:
+            print(f">>> Step 4 FAIL: Host B status: {triggered_2.get('host-B', 'Not Found')}")
+
+        check_mailhog()
